@@ -1328,3 +1328,63 @@ python scripts/smoke_train_stage2_infill.py
 Expected: `STEP 1 PASS`, `38 passed`, `STEP 2 PASS`, `STEP 3 PASS`,
 `STEP 4 PASS`, with the STEP 4 table showing `3.0229 GB` peak VRAM and
 `22.906364 -> 10.471284` loss.
+
+---
+
+## 10. STAGE 08 — Git Remote Wiring, Resumable Overnight Sharder & Stage 2 Pre-Training
+
+**Date:** 2026-10-21  
+**Scope:** Stage 08 execution on top of verified `v10.7.0` workspace.  
+**Hardware Profile:** NVIDIA GeForce RTX 5070 Ti Laptop GPU (12 GB VRAM ceiling target: <= 3.20 GB).
+
+### 10.1 Step 1: Git Remote Wiring & Verification
+1. `.gitignore` audited: Verified exclusion of `.venv/`, `target/`, `node_modules/`, `data/`, `checkpoints/`, `*.pt`, `*.pth`, `*.safetensors`, `*.onnx`, `*.wav`, `__pycache__/`.
+2. Git repository initialized at workspace root, branch set to `main`, remote wired:
+   ```bash
+   git remote add origin https://github.com/I-have-an-idea-67/Khmer-S2ST.git
+   ```
+3. Self-Audit Gate:
+   - `git status --ignored --short` confirmed `checkpoints/`, `data/`, `target/`, `.pytest_cache/`, `*__pycache__/` are ignored (`!!`).
+   - Confirmed zero `.pt` or `.wav` files staged.
+   - Committed clean `v10.7.0` tree: `feat(v10.7.0): locked 241.637M S2ST architecture, Rust PyO3 ABI, and Stage 07 bootstrap` (120 files changed, 64,033 insertions).
+   - Pushed successfully to `origin/main` (`git push -u origin main`).
+
+### 10.2 Step 2: Crash-Proof, Resumable Overnight Khmer Sharder
+1. Created `scripts/overnight_khmer_ingester.py` with multi-corpus streaming priority, PCM16 quantization (50% storage footprint reduction), 7-slot Rust decomposition, atomic shard flushing, and free disk space enforcement (`--min-free-gb 15.0`).
+2. Self-Audit Gate (Pilot Dry-Run):
+   - First run: `python scripts/overnight_khmer_ingester.py --shard-size 50 --max-clips 100`
+     - Created `shard_00000.pt` (50 clips, 38.17 MiB, < 40 MB ceiling).
+     - Created `shard_00001.pt` (50 clips, 38.57 MiB, < 40 MB ceiling).
+     - Total clips saved: 100.
+     - Audio tensors verified: `wav_16k` and `wav_24k` dtype `torch.int16`, 1-D mono.
+     - Linguistic slot tensors verified: 7 slots (`onset_ids`, `coeng_ids`, `medial_ids`, `register_ids`, `vowel_ids`, `coda_ids`, `sesqui_ids`), dtype `torch.int16`, non-negative vocab IDs, non-empty.
+   - Second run (Resume Safety):
+     - `Measure-Command { python scripts/overnight_khmer_ingester.py --shard-size 50 --max-clips 100 }`
+     - Elapsed: `1.952 seconds` (< 2.0s requirement).
+     - Output: `[RESUME] Target of 100 clips already reached (100 clips on disk). 0 duplicate shards written.`
+     - Self-Audit Gate: `PASSED [100% OK]`.
+
+### 10.3 Step 3: Overnight Runner & Stage 2 Pre-Training Loop
+1. Created `scripts/overnight_runner.py` chaining Phase A (sharding up to 10,000 clips in 500-clip shards) and Phase B (Stage 2 infill pre-training on RTX 5070 Ti).
+   - Dynamic batching: 4 random 2.0s segments (`wav_24k.float() / 32768.0`).
+   - Augmentation: `DynamicAcousticCorruptor.warp_formants_vtlp` with Vocos resynthesis.
+   - VRAM protection: `console.ear` and `console.pointer` parked on CPU during training.
+   - Rolling checkpoints: `stage2_latest.pt` and `stage2_best.pt` every 250 optimizer updates.
+2. Self-Audit Gate (10-Step Smoke Test):
+   - `python scripts/overnight_runner.py --smoke-test --smoke-steps 10`
+   - Initial loss: `67.004318` -> Final loss: `65.777145` (Best loss recorded: `65.777145`).
+   - Peak VRAM measured: `1.7702 GB` (Strictly within `<= 3.20 GB` ceiling).
+   - Rolling checkpoints verified saved to `checkpoints/stage2_latest.pt` and `checkpoints/stage2_best.pt`.
+   - Logging verified written to `checkpoints/overnight_train.log`.
+3. Background Overnight Job Launched:
+   - **Process ID (PID):** `56488`
+   - **Command Line:**
+     ```bash
+     python -u scripts/overnight_runner.py --phase all --shard-size 500 --max-clips 10000 --min-free-gb 15.0 --train-steps 10000 --save-every 250
+     ```
+   - **Active Log Paths:**
+     - Ingestion log: `data/khmer_overnight_shards/ingestion.log`
+     - Pre-training log: `checkpoints/overnight_train.log`
+     - Rolling checkpoint: `checkpoints/stage2_latest.pt`
+     - Best checkpoint: `checkpoints/stage2_best.pt`
+

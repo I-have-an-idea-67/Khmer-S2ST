@@ -1388,3 +1388,16 @@ Expected: `STEP 1 PASS`, `38 passed`, `STEP 2 PASS`, `STEP 3 PASS`,
      - Rolling checkpoint: `checkpoints/stage2_latest.pt`
      - Best checkpoint: `checkpoints/stage2_best.pt`
 
+### 10.4 Stage 2 Full Overnight Pre-Training Results (10,000 Steps)
+1. **Unattended Execution Metrics:**
+   - Completed all 10,000 optimizer updates on RTX 5070 Ti in 4,937.7 seconds (~82 minutes).
+   - Loss trajectory: Initial `67.004` -> Step 100 `3.920` -> Step 1,000 `1.152` -> Step 5,000 `0.428` -> Final best **`0.249097`**.
+   - Peak VRAM: Held at **`3.0209 GB`** across all 10,000 updates, strictly satisfying the $\le 3.20\text{ GB}$ ceiling.
+   - Rolling checkpoint saves: Every 250 steps, final at step 10,000 to `checkpoints/stage2_latest.pt` and `checkpoints/stage2_best.pt`.
+2. **Post-Training Inference Verification:**
+   - Strict checkpoint reload verified: 0 missing keys, 0 unexpected keys.
+   - Executed full-console `forward_s2st` on real Khmer speech segment (`1.5s` @ 16 kHz).
+   - Emitted clean 24 kHz waveform (36,000 samples) in `1.032s` on CUDA.
+   - Verified signal integrity: zero NaN/Inf, written to `checkpoints/stage2_post_train_sample.wav`.
+
+

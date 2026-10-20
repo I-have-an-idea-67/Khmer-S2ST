@@ -1,0 +1,1 @@
+**REVISION RETENTION POLICY:** The workspace root retains only the **current** revision (v10.7) and the **immediately preceding** one (v10.6). Revisions v10.1 through v10.5 are archived under `_archive_blueprints/` for provenance only and are not authoritative. The authoritative specification is this file; the `docs/` volumes are generated from it.

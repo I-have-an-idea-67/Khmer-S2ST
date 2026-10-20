@@ -1,0 +1,235 @@
+STAGE 02: PARALLEL SPECIALIST EXECUTION (GREEN PHASE - ZERO FILE OVERLAP)
+
+Every subsystem below carries a v10.5, v10.6 or v10.7 remediation. The v10.7
+items are marked **[v10.7]** and are all PARAMETER-FREE: the authoritative
+ledger must remain `241,637,457` (`prod_240m`) and `3,838,033` (`ci_micro`).
+
+- Specialist A (`backend/nn_cartridges/*`):
+  1. Implement `stem_and_mode_gate.py` (keeping N_BINS=257 for the 3-stem separator mask
+     and N_BINS_MEL=513 for mel_fb), `ear_cartridge.py` (N_BINS=513, rank 100),
+     `universal_core.py` (with `build_slaney_mel_fb`, N_BINS_24K=1025, and VocosISTFTHead
+     at 7.753M params), `codeswitch_router.py`, `duration_aligner.py`,
+     `mouth_cartridge.py` (with `reorder_attn` and normalized sinusoidal queries), and
+     `s2st_console.py` (N_BINS_24K=1025, rank 100, HOP_LENGTH=240). Use
+     `torch.Generator(device="cpu").manual_seed(42)` in `SceneAcousticMatcher` with a
+     jittered velvet grid, and use batched `torch.fft.rfft`/`irfft` in `apply_scene_glue`.
+  2. **[v10.7] P1-E (normalization stability):** `FastConformerBlock` MUST use
+     `nn.GroupNorm(8, d)` and MUST NOT use `nn.BatchNorm1d(d)`. BatchNorm
+     normalizes over the batch axis, which has size 1 during streaming inference, so its
+     running statistics are corrupted by batch-statistics estimation. GroupNorm
+     normalizes per sample and is correct at B=1. The swap is PARAMETER-NEUTRAL: both
+     hold 2*d trainable parameters (1,024 in prod, 256 in CI per block), and
+     BatchNorm's running buffers are not counted by `.parameters()`.
+  3. **[v10.7] P0-A (stateless cartridges):** `StreamingEarCartridge` and
+     `KhmerMouthCartridge` MUST NOT expose the per-call taps
+     (`last_l6_hidden`, `last_l8_hidden`, `last_next_past_kv`, `last_next_past_gate`,
+     `last_deferred_syll_count`, `last_pred_durations`, `last_gate_l`) as mutable module
+     attributes. Each MUST be a `@property` bridge onto the `CartridgeThreadState`
+     container from `backend/contracts/schemas.py`, which is backed by
+     `threading.local()`. The property bridges preserve 100% attribute
+     compatibility for every existing call site, while the underlying storage is
+     strictly per-thread.
+  4. **[v10.7] P0-A (B_spk guard):** `predict_syllables_and_align` MUST discard a
+     stale `past_clause_kv` whose `shape[0]` does not equal the current batch, instead
+     of concatenating mismatched batch dimensions (which raises a `RuntimeError` when
+     the number of active speakers changes between clauses).
+  5. **[v10.7] P0-A (batch-safe deferral):** `deferred_syll_count` MUST be
+     computed as `int(wait_mask.float().sum(dim=-1).max().item())`, not by indexing
+     `wait_mask[0]`, which silently ignored speakers 1..B-1.
+  6. **[v10.7] P1-C (step conditioning):** `predict_velocity` MUST embed the
+     timestep and the step size with the parameter-free `sinusoidal_time_embedding`
+     helper. The v10.6 code expanded a rank-1 scalar across every column, so
+     `time_mlp` only ever saw `w1*t + w2*dt + b` and could not express any non-linear
+     function of t. The embedding is parameter-free, so `time_mlp` keeps its
+     `Linear(d, d)` shape and the ledger is unchanged.
+  7. **[v10.7] P1-D (speaker timbre):** `forward_s2st` MUST add the L2-normalized,
+     mean-pooled layer-6 acoustic representation to `aligned_hidden` before
+     `self.cond_proj`, preserving vocal-tract identity in the acoustic conditioning
+     path. This is PARAMETER-FREE.
+  8. **[v10.7] P1-C (grounded distillation):** `compute_shortcut_distillation_loss`
+     MUST sample its coarse-to-fine step pairs DIRECTLY from the Sway schedule
+     (`SWAY_COEF = -0.8`, `SC_DISTILL_STEPS = 12`) using the shared
+     `sway_time_schedule` helper, so the training grid and the inference grid are
+     provably identical. The two finest teacher sub-steps MUST be evaluated with the
+     instantaneous velocity network (`dt=None`, i.e. `dt = 0.0`), which anchors the
+     whole hierarchy to the ground-truth OT-CFM vector field, and the teacher target
+     MUST be the step-weighted average `(dt_1 * v_step1 + dt_2 * v_step2) / dt_full`.
+  9. **[v10.7] P1-C (CFG consistency):** `integrate_shortcut_sway_ode` MUST accept a
+     `cfg_scale` and blend the conditional and unconditional velocities, and the
+     training-side CFG dropout MUST zero EXACTLY the tensors the inference
+     unconditional branch zeros (`cond` and `emo_tokens`), so the guided direction
+     points at a branch the model was actually trained on. `cfg_scale = 1.0`
+     reproduces the v10.6 behaviour exactly.
+  10. **[v10.7] P1-C (non-circular durations):** `compute_s2st_training_losses` MUST
+      supervise `pred_durs` against the monotonic attention mass of `reorder_attn`
+      (`attn_w.sum(dim=-1)`, scaled to `T_mel`, with the 6-frame minor-syllable cap and
+      the excess redistributed to the major syllables), NOT against a static
+      0.25 / 1.00 prior that carries no acoustic information.
+
+  11. **[v10.7] AUD-107-01 (deferred wait-gating):** `predict_syllables_and_align` MUST
+      apply the `wait_mask` (0, 0, 0) no-op masking AFTER the
+      `if target_lang == "en":` branch, not before it. The v10.7 code masked
+      first and the English branch then overwrote `onset_ids`, `vowel_ids` and
+      `coda_ids` with the reserved English ranges, so on a KM to EN Trigger #2
+      slice the deferred tail was never masked: the tail syllables were emitted
+      in the current clause AND deferred to the next one, duplicating the words.
+      The mask MUST also cover `coeng_ids` and `sesqui_ids`, so a deferred
+      syllable is a COMPLETE no-op. `sesqui_ids == 0` is the zero-frame
+      sentinel consumed by `LearnedDurationAligner.forward`, which MUST give it a
+      0.0 duration prior weight, so the diffusion model stops allocating
+      acoustic frames to a syllable that is not spoken in this clause.
+  12. **[v10.7] AUD-107-09 (deferred syllables must not steal attention):**
+      `LearnedDurationAligner.forward` MUST mask the `sesqui_ids == 0` columns to
+      -1e9 in `attn_logits` BEFORE `F.softmax`. A deferred syllable has a zero
+      duration, so its cumulative centre sits at `target_frames`, but it still
+      received softmax mass there and squeezed the REAL syllables (measured:
+      1.628554 of the 24-frame mass per deferred token). The mask MUST be
+      applied only where the row has at least one active syllable
+      (`has_active`), so a fully deferred row stays well defined.
+  13. **[v10.7] AUD-107-02 (the ear runs once per slice):**
+      `SymmetricS2STConsole.forward_s2st` MUST accept
+      `precomputed_ear: Optional[PrecomputedEarFeatures] = None`, and
+      `FullDuplexRunner.process_utterance_slice` MUST pass it, so that
+      `StreamingEarCartridge` and `log_mel` execute only ONCE per utterance
+      slice. The v10.7 runner ran the ear, then `log_mel` twice more, then the
+      emotion encoder whose output was discarded, and then called `forward_s2st`,
+      which ran the ear and the emotion encoder a second time on the identical
+      audio, doubling the 64.5M-parameter ear and the 8.7M-parameter emotion
+      encoder on every spoken utterance.
+
+- Specialist B (`crates/khmer-linguistics-rs/*` & `backend/linguistics/*`):
+  1. Implement the Rust normalizer and 7-slot syllable decomposer in
+     `crates/khmer-linguistics-rs` and expose `BilingualCodeSwitchDecomposer` in
+     `backend/linguistics/syllable_decomposer.py` preserving `\u200b`, integrating
+     `khmer-nltk` for unspaced sub-spans, partitioning all 14 Khmer codas into 8
+     phonological classes `[1..8]` via `CODA_GROUP_MAP`, encoding Bantoc codas into
+     `[9..16]`, and using deterministic G2P phonetic approximation for Latin loanwords
+     and foreign brands with 63-way `coeng_id` hash disambiguation and open-syllable
+     fallback.
+  2. **[v10.7] P1-A (independent vowels):** `khmer_normalizer.py` MUST canonicalize
+     U+17AB..U+17AE to a consonant plus a dependent vowel (U+179A U+17B9, U+179A U+17BA,
+     U+179B U+17B9, U+179B U+17BA) and MUST map U+17A8 to the open (vowel-final)
+     form U+17A2 U+17BB U+1780. The v10.6 map sent these four codepoints to
+     THEMSELVES, and because `_SYLLABLE_SCAN_RE` begins at U+1780 the decomposer
+     SKIPPED them entirely, silently deleting the first syllable of any word that
+     began with one. The Rust `normalize_khmer_pure` MUST apply the identical
+     mapping so the two paths agree.
+  3. **[v10.7] P1-B (English alphabet):** `syllable_decomposer.py` MUST reserve
+     `coeng_id == 0` for SYNTHESIZED English target syllables and
+     `coeng_id` in 1..63 for INPUT code-switched Latin brands, and MUST decode the
+     former through `ENGLISH_SYLLABLE_TABLE` (onset ids 34..57, medial ids 0..3,
+     vowel ids 28..44, coda ids 18..31) rather than through the hardcoded CVC
+     fallback that ignored `coeng_id` and emitted text such as "kak".
+  4. **[v10.7] P1-B (brand slot integrity):** `_foreign_to_token` MUST keep
+     exactly ONE token per brand word, and every register-3 token MUST satisfy
+     `18 <= coda_id <= 31`. Slot 18 is the OPEN (vowel-final) coda and 19..31 are the
+     13 closed consonant codas.
+
+- Specialist C (`backend/training/*`):
+  1. Implement `DynamicAcousticCorruptor` (`corrupt_youtube_mixture` with
+     primary-RMS-relative SNR and decaying room echo, plus 2D `(B, M, T, 2)`
+     0-Hz/Nyquist-anchored `warp_formants_vtlp`) in `augmentations.py` and
+     `CartridgeTrainer` in `train_cartridge.py`.
+  2. **[v10.7] P2-B (mixed precision):** `CartridgeTrainer.__init__` MUST honour
+     `self.profile.gradient_checkpointing` by applying activation checkpointing to the
+     ear and mouth cartridge block stacks, and `train_step` MUST accept EITHER a
+     pre-computed loss tensor OR a callable that performs the forward pass. The
+     forward pass runs under `torch.amp.autocast`; the backward pass MUST run
+     OUTSIDE the autocast block. Wrapping `.backward()` in autocast is a
+     documented PyTorch anti-pattern.
+  3. **[v10.7] P2-B (teacher distillation):** `CartridgeTrainer` MUST expose an
+     `attach_distiller` method and MUST aggregate the `MultiTeacherEarDistiller`
+     loss with the main loss inside the same autocast forward pass. The v10.6
+     trainer initialised the distiller but never called it.
+  4. **[v10.7] P2-C (benchmark entry point):** `eval_s2st_suite.py` MUST implement
+     `evaluate()`, wiring ASR-BLEU, chrF, UTMOS, DNSMOS, speaker similarity,
+     emotion similarity and mean turnaround latency into the existing
+     `S2STEvalReport` dataclass, whose fields were otherwise never assigned.
+
+  5. **[v10.7] AUD-107-04 (checkpointing must not rename state_dict keys):**
+     `apply_gradient_checkpointing` MUST bind an instance-level `types.MethodType`
+     `forward` wrapper (flagged `_v107_checkpointed`) on each block, rather than
+     wrapping the block in a child `nn.Module`. The v10.7 `_CheckpointedBlock`
+     held the real block as `self.blk`, which renamed every parameter key from
+     `ear.blocks.0.self_attn...` to `ear.blocks.0.blk.self_attn...` and made a
+     laptop-profile checkpoint unloadable under the cloud profile. The nn.Module
+     hierarchy MUST be left untouched, preserving 100% of
+     `model.state_dict().keys()`.
+
+- Specialist D (`crates/khmer-transport-rs/*`, `crates/khmer-dsp-wasm/*`, `backend/transport/*` & `frontend/src/*`):
+  1. Implement `InMemorySession` (with `reset_on_seek`, active clause wall-clock elapsed
+     ceiling `utterance_wall_clock_ms - silence_ms >= 1600ms` on Trigger #2,
+     $\pm 1$ duration-bucket fuzzy match with `cached_crc` validation on live seeks in
+     `lookup_cached_event`, 8-bin normalized energy envelope replay cache, and
+     continuous timestamp clock sync), Cosine `SpeakerRegistry`, Lock-Free
+     `LiveRequestQueue`, and `FullDuplexRunner` (with in-flight epoch fencing and
+     speaker centroids pass-through) in `backend/transport/`.
+  2. Implement the TypeScript frontend in `frontend/src/` (`pcm-capture-processor.ts`
+     with unity-gain 15-tap sinc decimator `sum = 1.0000`, `stereo-mne-mixer.ts` with
+     4096-bin ERB suppressor mapping all 64 bands via `Math.floor(ERB_BANDS * norm)`
+     and client-epoch fencing across `decodeAudioData`, `duplex-ws-client.ts` with
+     non-destructive event listeners, and `caption-overlay.ts` with XSS-safe DOM node
+     creation).
+  3. **[v10.7] P0-B (lock coverage):** `InMemorySession.append_pcm_chunk`,
+     `cache_dubbed_event` and `lookup_cached_event` MUST hold `self._lock` for their
+     whole bodies, and `SpeakerRegistry` MUST own a `threading.RLock` held across the
+     read-modify-write of `self.centroids`. The v10.6 code mutated all four
+     without any lock, so the replay cache could be resized during iteration and the
+     centroid list could be observed half-updated.
+  4. **[v10.7] P0-A (KV lifecycle):** `InMemorySession.append_pcm_chunk` MUST flush
+     `past_clause_kv`, `past_gate_kv` and `deferred_syll_count` on a Trigger #1
+     natural pause and on a micro-pop rejection, and MUST track
+     `last_slice_was_hard_ceiling`. `FullDuplexRunner.process_utterance_slice` MUST
+     pass the session's rolling state and `is_hard_ceiling_slice` into
+     `forward_s2st`, and MUST commit the new state back to the session ONLY after the
+     post-synthesis epoch fence has passed. The v10.6 runner never passed the four
+     rolling-state arguments at all, so the feature was dead code in production.
+  5. **[v10.7] P1-D (registry identity):** `process_utterance_slice` MUST register
+     speakers using an energy-weighted, L2-normalized mean pool of the layer-6
+     acoustic representation, NOT the `DisentangledEmotionEncoder` output. The
+     emotion encoder applies `F.instance_norm` and `avg_pool1d(k=25)`, which remove
+     exactly the spectral envelope the registry needs to tell speakers apart.
+  6. **[v10.7] P0-B (epoch fence):** `worker_loop` MUST snapshot
+     `pkt_epoch = queue.interrupt_epoch` BEFORE awaiting the GPU semaphore and MUST
+     re-check it inside the semaphore, aborting the slice when it changed. The
+     v10.6 snapshot was taken inside the worker thread, i.e. after the semaphore
+     wait, so a seek that landed during the wait was invisible to the fence and the
+     stale pre-seek audio was emitted after the `interrupted` packet.
+  7. **[v10.7] P1-E (upstream capture):** `duplex-ws-client.ts` MUST gain an
+     `attachAudioCapture(ctx)` that creates the `AudioWorkletNode`, forwards the
+     worklet's binary `ArrayBuffer` frames to `ws.send`, and posts
+     `{ baseVideoTimeMs, playbackRate }` on connect, seeking, playing and ratechange.
+     The v10.6 client never instantiated the worklet and never sent a binary frame,
+     so the server's `upstream_reader` waited forever for bytes that never arrived
+     and the full-duplex loop could not function.
+  8. **[v10.7] P1-E (media clock):** `pcm-capture-processor.ts` MUST advance its
+     media clock by the wall-clock delta scaled by the video `playbackRate`, so the
+     upstream timestamps track the VIDEO timeline rather than the 1.0x AudioContext
+     clock.
+  9. **[v10.7] AUD-107-03 / AUD-107-05 / AUD-107-06 (frontend DSP, transport and
+     real-time hygiene):** `StereoMneMixer` MUST precompute `COS_TABLE_MNE`,
+     `SIN_TABLE_MNE`, `COS_TABLE_MNE_INV`, `SIN_TABLE_MNE_INV` and `REV_TABLE_MNE`
+     ONCE at module load, rather than allocating the twiddle tables and calling
+     `Math.log2(size)` inside the bit-reversal loop of every 4096-sample block
+     (98,304 `Math.log2` calls per block, inside a real-time WebAudio callback
+     where a GC pause is an audible dropout).
+     `attachMediaElement` MUST insert a `DelayNode` of `LOOKAHEAD_BUFFER_SEC`
+     (2.0 s) between the `source` (`MediaElementAudioSourceNode`) and the
+     `processor` (`ScriptProcessorNode`), while still returning the UNDELAYED
+     source node so `DuplexWsClient.attachAudioCapture` can tap the audio ahead
+     of playback. Because the M&E audio stream is delayed by 2.0 s, the
+     `onaudioprocess` callback queries
+     `this.processMidSideFrame(this.ctx.currentTime, ...)` and reconstructs the
+     time-domain Mid channel via `_inverseSpectrum`; `handleDownstreamEvent`
+     MUST only push the decoded segment into `this.erbQueue` and MUST NOT run a
+     redundant FFT pass. The v10.7 prompt resolved the mask at the segment's own
+     `lookaheadTargetTime`, which the 2.0 s DelayNode invalidated.
+     `DuplexWsClient.attachAudioCapture` MUST route the capture worklet into a
+     `GainNode` with `gain.value = 0.0` connected to `ctx.destination`, so
+     undelayed dry audio can never bleed to the speakers and bypass the M&E
+     suppressor.
+  10. **[v10.7] AUD-107-02 (the ear runs once per slice):**
+      `FullDuplexRunner.process_utterance_slice` MUST pass a
+      `PrecomputedEarFeatures` bundle into `console.forward_s2st`, so the
+      `StreamingEarCartridge` runs once per slice instead of twice.
+

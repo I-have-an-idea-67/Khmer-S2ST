@@ -1,0 +1,18 @@
+[package]
+name = "khmer-transport-rs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "khmer_transport_rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+crc32fast.workspace = true
+crossbeam-channel.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pyo3.workspace = true

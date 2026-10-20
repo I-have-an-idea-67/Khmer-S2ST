@@ -1,0 +1,2 @@
+**DOCUMENT PROVENANCE & v10.7 AUDITED UPGRADE LEDGER:**
+This file is the **v10.7 (Code-Level Audit Remediation) Edition** of the KHMER-SOVEREIGN-S2ST blueprint. It supersedes v10.6, carries forward every v10.6 correction, and adds the code-level remediation catalogued in `docs/05_CODE_LEVEL_AUDIT_AND_REMEDIATION.md`:

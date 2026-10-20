@@ -1,0 +1,20 @@
+[package]
+name = "khmer-linguistics-rs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "khmer_linguistics_rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+unicode-normalization.workspace = true
+crc32fast.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pyo3.workspace = true

@@ -1,0 +1,85 @@
+
+## Parameter Ledger (Unchanged)
+
+The v10.7 remediation is **parameter-free by construction**. Every fix uses an
+existing module, a parameter-free helper, or a plain data table, so the
+authoritative ledger is preserved **exactly**:
+
+| Module | `prod_240m` | `ci_micro` |
+| :--- | ---: | ---: |
+| `Causal3StemSeparator` | 5,864,197 | 231,877 |
+| `VocalModeGate` | 816,388 | 31,684 |
+| `StreamingEarCartridge` | 64,546,817 | 528,129 |
+| `DisentangledEmotionEncoder` | 8,735,748 | 184,196 |
+| `AcousticPointerCodeSwitchBridge` | 4,989,953 | 329,857 |
+| `KhmerMouthCartridge` | 148,931,136 | 2,109,504 |
+| `VocosISTFTHead` | 7,753,218 | 422,786 |
+| **COMBINED TOTAL** | **241,637,457** | **3,838,033** |
+
+The two changes that touch a module's parameter structure are both
+parameter-**neutral**:
+
+- `nn.BatchNorm1d(d)` -> `nn.GroupNorm(8, d)`. Both hold `2*d` trainable
+  parameters (1,024 in prod, 256 in CI per block). BatchNorm's `running_mean`,
+  `running_var` and `num_batches_tracked` are buffers and are **not** counted by
+  `.parameters()`.
+- The parameter-free `sinusoidal_time_embedding` helper and the
+  `CartridgeThreadState` container add no modules at all, and
+  `time_mlp` keeps its `Linear(d, d)` shape.
+
+## Validation Suite
+
+### v10.6 inherited (must remain green)
+
+| ID | Check | Result |
+| :--- | :--- | :--- |
+| V1 | Parameter ledger re-derivation under `torch.device("meta")` | **PASS** - `241,637,457` / `3,838,033`, exact, per module |
+| V2 | Version-string sweep (`10.7.0` in exactly five places, no stale `10.6.0`) | **PASS** - 16 occurrences of `10.7.0`, 0 of `10.6.0` |
+| V3 | `cargo test --workspace` | **PASS** - 4 tests across 3 crates, 0 failed |
+| V4 | Rust to Python normalization parity (U+17A3..U+17B3, U+17A8, U+200B) | **PASS** - the Rust normalizer applies the identical independent-vowel mapping |
+| V5 | Extracted Gate 1 to Gate 6 suite | **PASS** - 32 tests, 0 failed, with every v10.6 assertion retained verbatim |
+| V6 | Doc-volume regeneration (zero divergence) | **PASS** - each volume is an exact master partition |
+| V7 | Ownership-plan completeness | **PASS** - every Part 2.2 file has exactly one owner, including `docs/05` |
+
+### v10.7 new
+
+| ID | Check | Result |
+| :--- | :--- | :--- |
+| V8 | Concurrency stress (6 threads, 2.0 s, session + registry) | **PASS** - 0 exceptions, no torn cache, no torn centroid list |
+| V8b | Deterministic lock coverage (an instrumented lock records acquisitions) | **PASS** - all five mutating methods hold their lock |
+| V9 | Rolling KV lifecycle (persist across a Trigger #2 slice, flush on a Trigger #1 pause) | **PASS** |
+| V10 | Step-conditioning is not rank degenerate | **PASS** - embedding rank 5 (v10.6 rank 1), and `predict_velocity` varies with both `t` and `dt` |
+| V11 | English slot partition (register 3 partitioned by `coeng_id`; reserved ranges disjoint) | **PASS** |
+| V12 | Independent vowel reachability (U+17AB..U+17AE survive decomposition) | **PASS** |
+| V13 | Batch awareness (`separate_and_classify` with `B = 2`) | **PASS** |
+| V14 | Frontend wiring (worklet, binary upstream path, `baseVideoTimeMs`, ERB consumption, rate-scaled clock) | **PASS** - 13 of 13 static checks |
+| V15 | Mixed precision and checkpointing (profile values read, autocast forward, backward outside) | **PASS** |
+| V16 | Benchmark completeness (`evaluate` present, every report field assigned) | **PASS** |
+| V17 | Rust source and blueprint parity (`crates/khmer-linguistics-rs/src/lib.rs` byte-identical to the Part 4.9.4 block) | **PASS** |
+| V18 | Generator idempotency (re-run produces byte-identical output) | **PASS** |
+
+## Environment Caveats
+
+- `sacrebleu` and `funasr` are **declared** in `pyproject.toml` but are not
+  importable in the current environment. The evaluation suite is a training-time
+  tool and no gate imports it, so this is not a regression; it is recorded here so
+  it is not mistaken for one. The COMET and DNSMOS pillars in `evaluate()` are
+  optional and degrade to `0.0` when their packages or checkpoints are absent.
+- `frontend/node_modules` is not installed in the workspace. The TypeScript
+  blocks were typechecked under `strict` mode with a locally installed
+  TypeScript 5.4.5 (`npx tsc --noEmit`, exit code 0).
+
+## Regeneration Procedure
+
+The v10.7 master and all `docs/` volumes are produced by two idempotent scripts:
+
+```
+python __gen_v107.py          # v10.6 master -> v10.7 master + docs/01..03
+python __v107_materialize.py  # v10.7 master -> runnable backend/ + frontend/src/ + gates
+python __v107_verify.py       # runs V1, V8, V8b, V10, V12, V14 against the master
+```
+
+Every edit in `__gen_v107.py` is an asserted replacement that aborts on an
+occurrence-count mismatch, so a partially applied edit is impossible. The
+replacement blocks live in `__v107_blocks/` as plain files, which keeps the
+generator readable and the diff auditable.

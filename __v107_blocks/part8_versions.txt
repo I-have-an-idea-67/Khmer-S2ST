@@ -1,0 +1,4 @@
+@@OLD1@@
+You are the Master Orchestrator building KHMER-SOVEREIGN-S2ST (v10.7 - Code-Level Audit Remediation Edition).
+@@OLD2@@
+STAGE 06: v10.7 DOCUMENT-TRUTH VALIDATION (MANDATORY BEFORE SIGN-OFF)

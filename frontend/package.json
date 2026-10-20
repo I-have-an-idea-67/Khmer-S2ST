@@ -1,0 +1,11 @@
+{
+  "name": "khmer-sovereign-s2st-frontend",
+  "version": "10.7.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

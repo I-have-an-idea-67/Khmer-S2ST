@@ -1,0 +1,23 @@
+The project version is **`10.7.0`**. Exactly five files carry it; every other
+file must reference, never redefine, this value.
+
+| File | Manifest key | Value |
+| :--- | :--- | :--- |
+| `Cargo.toml` | `[workspace.package] version` | `10.7.0` |
+| `pyproject.toml` | `[project] version` | `10.7.0` |
+| `frontend/package.json` | `version` | `10.7.0` |
+| Master blueprint, Part 2.3 | `Cargo.toml` / `pyproject.toml` / `package.json` blocks | `10.7.0` |
+| Master blueprint, Part 8 | Master Orchestrator prompt, STAGE 00 step 2 | `10.7.0` |
+
+> [!IMPORTANT]
+> **v10.7 audit note.** The v10.6 code-level audit found eleven defects in the
+> Part 4 reference implementations: the rolling cross-clause KV cache was
+> never passed to the console (so the feature was dead code), the session and
+> registry state was mutated without locks, the epoch fence was snapshotted
+> after the GPU semaphore wait, the timestep embedding was rank-2, the speaker
+> registry matched on speaker-invariant features, the KM to EN path emitted
+> CVC pseudowords, the frontend never transmitted upstream audio, and the
+> 48 kHz ERB mask was computed but never applied. All eleven are remediated
+> in v10.7 with **zero new trainable parameters**: the parameter ledger is
+> unchanged at `241,637,457` (`prod_240m`) and `3,838,033` (`ci_micro`). Any
+> future revision must re-run this sweep (Validation **V2**) before sign-off.

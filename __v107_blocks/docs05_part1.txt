@@ -1,0 +1,52 @@
+# Code-Level Audit Findings and Remediation (v10.6 -> v10.7)
+
+This is the **code-level** audit ledger. It complements `docs/04_AUDIT_FINDINGS_AND_REMEDIATION.md`,
+which covers the v10.5 to v10.6 **document-level** defects (numeric claims, version
+strings, file-tree and ownership drift, the Rust ABI gap, the ERB band claim, and the
+orphaned whitepaper).
+
+## Audit Method
+
+All 27 code blocks were extracted from the v10.6 master's Part 4 and traced by call
+graph. Every finding was confirmed against the extracted source, and every
+load-bearing numeric claim in the remediation was re-derived by execution rather
+than accepted on assertion:
+
+| Claim | Method | Result |
+| :--- | :--- | :--- |
+| `GroupNorm(8, d)` is parameter-neutral vs `BatchNorm1d(d)` | `sum(p.numel() for p in m.parameters())` on both | **CONFIRMED** - 1,024 at d=512, 256 at d=128; BatchNorm's `running_mean` / `running_var` / `num_batches_tracked` are buffers and are excluded from `.parameters()` |
+| `onset_id[34..57]` is free for English | 33 Khmer consonants occupy `onset_to_id` 1..33 | **CONFIRMED** - 34..63 free; 34..57 is a valid 24-slot window |
+| `vowel_id[28..44]` is free for English | `KHMER_VOWELS` holds 25 entries (0..24); 25..27 reserved, 28..47 foreign | **CONFIRMED** |
+| `coeng_id == 0` is free for synthesized English | brands use `1 + (crc32 % 63)`, i.e. 1..63 | **CONFIRMED** - 0 is never allocated by `_foreign_to_token` |
+| `h_acoustic_l6` is 512-D in **both** profiles | `bus_proj = nn.Linear(ear_d_model, SEMANTIC_DIM)` | **CONFIRMED** - 512 regardless of `ear_d_model` (512 prod / 128 CI) |
+| Sway ODE step sizes fall outside the trained `dt_val` | recomputed the schedule at `steps=12, sway_coef=-0.8` | **CONFIRMED** - `dt_step` spans 0.0235 to 0.1211; the trained `dt_val=0.125` and `2*dt_val=0.25` are never produced by inference |
+| P0-A rolling KV is disconnected | symbol counts across the four transport and console modules | **CONFIRMED** - `runner.py` contained **zero** references to `past_clause_kv`, `past_gate_kv`, `deferred_syll_count`, `is_hard_ceiling_slice` |
+| P0-B locks are incomplete | per-method body scan of `session.py` | **CONFIRMED** - `append_pcm_chunk`, `cache_dubbed_event`, `lookup_cached_event`, `match_or_register_speaker` mutated shared state with no lock; only `reset_on_seek` held `self._lock` |
+| P0-B epoch fence is bypassable | traced `worker_loop` and `process_utterance_slice` | **CONFIRMED** - `epoch_before` was snapshotted inside the worker thread, i.e. **after** `async with GPU_SEMAPHORE` |
+| P1-A independent vowels are dropped | codepoint inspection of `_INDEPENDENT_VOWEL_MAP` and `_SYLLABLE_SCAN_RE` | **CONFIRMED** - U+17AB..U+17AE mapped to themselves and the scan regex begins at U+1780 |
+| P1-B brands collapse to CVC pseudowords | traced the `r == 3` branch of `decode_batch_to_text` | **CONFIRMED** - the cold-cache fallback ignored `coeng_id` and emitted text such as `"kak"` |
+| P1-C time embedding is rank-2 | inspected `predict_velocity` | **CONFIRMED** - `t.view(B,1).expand(B, d_half)`; `time_mlp` saw only `w1*t + w2*dt + b` |
+| P1-D registry uses speaker-invariant features | inspected `DisentangledEmotionEncoder.forward` | **CONFIRMED** - `F.instance_norm` plus `avg_pool1d(k=25)` remove the spectral envelope that carries timbre |
+| P1-E frontend DSP is unwired | symbol counts across all four TypeScript blocks | **CONFIRMED** - `applyMidSideSpectralErbMask` and `getActiveErbMaskForTime` were defined once each and never called; `baseVideoTimeMs` appeared only in the worklet |
+| P2-A batch index hardcoded | inspected `separate_and_classify` | **CONFIRMED** - `stems[0,0]`, `stems[0,1]`, `erb_mask[0]` |
+| P2-B precision and checkpointing unused | symbol counts in `train_cartridge.py` | **CONFIRMED** - `autocast` x0, `GradScaler` x0 |
+| P2-C eval suite incomplete | method enumeration of `AutomatedS2STBenchmarkSuite` | **CONFIRMED** - no `evaluate()` method existed |
+
+## Findings
+
+| ID | Severity | Finding | v10.7 remediation |
+| :--- | :--- | :--- | :--- |
+| P0-A | Critical | The rolling cross-clause KV cache and the Hibiki entropy wait-gating were **dead code**: `runner.py` never passed the four rolling-state arguments into `forward_s2st`, and never read the produced state back. The console and mouth cartridge implemented all four. | The runner now threads the state through and commits it back **only after** the post-synthesis epoch fence passes. A `B_spk` guard discards a stale cache whose batch dimension differs (previously a `RuntimeError` in `torch.cat`). `deferred_syll_count` is computed batch-safely. The seven mutable `last_*` taps were replaced by `@property` bridges onto a `threading.local()` container. |
+| P0-B | Critical | The session and registry state was mutated without locks, and the epoch fence was snapshotted after the GPU semaphore wait, so a seek landing during the wait was invisible and stale pre-seek audio was emitted after the `interrupted` packet. | Full `RLock` coverage on the three unprotected session methods, a dedicated `threading.RLock` on `SpeakerRegistry`, and the epoch snapshot moved before the semaphore with a re-check inside it. |
+| P1-A | High | The independent vowels U+17AB..U+17AE mapped to **themselves**, and `_SYLLABLE_SCAN_RE` begins at U+1780, so a word beginning with one **silently lost its first syllable** and a standalone one fell back to the default onset id 1. | The four are canonicalized to a consonant plus a dependent vowel, and U+17A8 to the open (vowel-final) form. The Rust normalizer applies the identical mapping. |
+| P1-B | High | The KM to EN path emitted **synthetic CVC pseudowords** (for example `"kak"`) for every syllable, because the decoder resolved register 3 through a cache that only the encoder populates, and the fallback ignored `coeng_id`. | Register 3 is partitioned by `coeng_id`: 0 is a synthesized English target syllable decoded through `ENGLISH_SYLLABLE_TABLE`; 1..63 remains an input Latin brand. The brand coda table is renumbered so slot 18 is the open coda and 19..31 the 13 closed codas, keeping `18 <= coda_id <= 31` true for every register-3 token. |
+| P1-C | High | The timestep embedding was **rank 2**, so `time_mlp` could not express any non-linear function of `t`. The distillation loss hardcoded `dt_val = 0.125`, a step the Sway ODE never visits, and the CFG dropout was never used at inference. The duration target was a static prior carrying no acoustic information. | A parameter-free `sinusoidal_time_embedding` (rank 5 across the unit interval), distillation intervals sampled from the shared Sway schedule with the two finest teacher sub-steps anchored to the instantaneous velocity, CFG applied at inference with the training dropout zeroing exactly the tensors the unconditional branch zeroes, and duration targets derived from the `reorder_attn` attention mass. |
+| P1-D | High | The `SpeakerRegistry` matched on `DisentangledEmotionEncoder` output, but that encoder applies `F.instance_norm` and `avg_pool1d(k=25)`, which remove the spectral envelope that carries **vocal-tract identity**. The registry was matching on emotional prosody. | An energy-weighted, L2-normalized mean pool of the layer-6 acoustic representation, added to `aligned_hidden` before `cond_proj`. Parameter-free. |
+| P1-E | High | The 48 kHz ERB mask was computed and shipped but **never applied**, `baseVideoTimeMs` was never posted, and the capture worklet advanced its media clock at the AudioContext's 1.0x rate rather than the video's rate. | `processMidSideFrame` on the mixer, resolving the mask at the segment's own `lookaheadTargetTime`; `attachAudioCapture` on the client posting `{ baseVideoTimeMs, playbackRate }` on connect, seeking, playing and ratechange; a rate-scaled media clock in the worklet. |
+| P2-A | Medium | `separate_and_classify` hardcoded `stems[0,0]`, `stems[0,1]` and `erb_mask[0]`, discarding batch elements 1..B-1, and `mic_eq.expand(B_spk, -1, -1)` raises a `RuntimeError` when `B = 2` and `B_spk = 1`. | The stems, mask, `mic_eq`, `rt60` and `wet` are aggregated across the batch, weighted by per-batch RMS energy, down to batch size 1 before the expand. `erb_suppression_mask` stays 2D. |
+| P2-B | Medium | `TRAINING_PROFILES` declared `precision` and `gradient_checkpointing`, but `CartridgeTrainer` read **neither**, and the `MultiTeacherEarDistiller` loss was never aggregated. | Checkpointing is applied to the model at construction, `train_step` accepts a loss tensor **or** a callable, the forward runs under `torch.amp.autocast` with the backward **outside** it, and the distiller loss is aggregated in the same forward pass. |
+| P2-C | Medium | `AutomatedS2STBenchmarkSuite` initialised every model and implemented only two of the five pillars, so every field of `S2STEvalReport` was left unassigned. | `evaluate()` wires ASR-BLEU, chrF, UTMOS, DNSMOS, speaker similarity, emotion similarity and mean turnaround latency into the report. |
+| P2-D | Medium | Gates 1 to 6 did not cover independent-vowel canonicalization, cross-clause rolling KV persistence, or seek and interrupt fencing under concurrent GPU load. | Gates 1, 2, 5 and 6 are expanded, with every v10.6 assertion retained **verbatim**. |
+| A-1 | Critical | **Additional finding.** The upstream audio path was **absent entirely**: `DuplexWsClient` contained no `addModule`, no `AudioWorkletNode` and no binary `ws.send`, so the server's `upstream_reader` could never receive the frames it waits for and the full-duplex loop could not function. The v10.6 audit had framed this only as "unwired DSP". | Closed by the P1-E transport remediation. |
+| A-2 | High | **Additional finding.** The brand `coeng_hash = 1 + (crc32 % 63)` collided with the Khmer coeng space (1..33) and with itself ("calvin" and "klein" both hashed to 25), so a brand token and a Khmer coeng token were not separable by `coeng_id` alone. | This is the structural root cause of P1-B, repaired by the same reserved-range partition. |
+| A-3 | Low | **Additional finding.** `last_gate_l` was written on every forward pass and never read. | Removed with the other mutable taps. |

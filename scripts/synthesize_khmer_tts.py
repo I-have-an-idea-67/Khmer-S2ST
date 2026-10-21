@@ -101,8 +101,13 @@ def load_reference_audio(shards_dir: Path, target_sr: int = 24000) -> torch.Tens
 
 def save_wav_16bit(filepath: Path, wav_tensor: torch.Tensor, sample_rate: int = 24000) -> None:
     """Write 1-D mono float tensor to 16-bit PCM WAV file with canonical 44-byte header."""
-    wav_clamped = wav_tensor.detach().cpu().squeeze().clamp(-1.0, 1.0)
-    pcm16 = (wav_clamped * 32767.0).to(torch.int16).numpy().tobytes()
+    wav = wav_tensor.detach().cpu().squeeze().float()
+    peak = float(wav.abs().max().item())
+    if peak > 0.0:
+        wav_norm = (wav / peak) * 0.92
+    else:
+        wav_norm = wav
+    pcm16 = (wav_norm.clamp(-1.0, 1.0) * 32767.0).to(torch.int16).numpy().tobytes()
     with wave.open(str(filepath), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -117,6 +122,7 @@ def synthesize_khmer_speech(
     ref_wav_24k: torch.Tensor,
     cfg_scale: float = 1.5,
     euler_steps: int = 12,
+    frames_per_syllable: int = 24,
     device: torch.device = torch.device("cuda"),
 ) -> Tuple[torch.Tensor, int, int]:
     """
@@ -138,7 +144,7 @@ def synthesize_khmer_speech(
             khmer_text, device=str(device)
         )
         L_syll = syll_batch.onset_ids.shape[1]
-        target_frames = max(24, int(L_syll * 18))  # ~180ms per syllable at 100 Hz
+        target_frames = max(24, int(L_syll * frames_per_syllable))  # ~240ms per syllable at 100 Hz
 
         # 3. Predict syllables and align duration conditioning
         B = 1
@@ -180,6 +186,7 @@ def run_synthesis_and_audit(
     output_dir: Path,
     cfg_scale: float = 1.5,
     euler_steps: int = 12,
+    frames_per_syllable: int = 24,
 ) -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("=" * 78)
@@ -192,6 +199,7 @@ def run_synthesis_and_audit(
     print(f"Output Directory  : {output_dir}")
     print(f"CFG scale         : {cfg_scale}")
     print(f"Euler steps       : {euler_steps}")
+    print(f"Frames / syllable : {frames_per_syllable} ({frames_per_syllable*10}ms/syllable)")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -233,6 +241,7 @@ def run_synthesis_and_audit(
             ref_wav_24k=ref_wav_24k,
             cfg_scale=cfg_scale,
             euler_steps=euler_steps,
+            frames_per_syllable=frames_per_syllable,
             device=device,
         )
         save_wav_16bit(out_path, wav_out, sample_rate=SR_24K)
@@ -337,6 +346,12 @@ def main() -> int:
         default=12,
         help="Euler integration steps (default: 12).",
     )
+    parser.add_argument(
+        "--frames-per-syllable",
+        type=int,
+        default=24,
+        help="Target acoustic frames (100 Hz) per syllable (default: 24, i.e. 240ms/syllable).",
+    )
     args = parser.parse_args()
 
     return run_synthesis_and_audit(
@@ -346,6 +361,7 @@ def main() -> int:
         output_dir=Path(args.output_dir),
         cfg_scale=args.cfg_scale,
         euler_steps=args.euler_steps,
+        frames_per_syllable=args.frames_per_syllable,
     )
 
 

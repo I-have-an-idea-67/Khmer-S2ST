@@ -1461,30 +1461,31 @@ Expected: `STEP 1 PASS`, `38 passed`, `STEP 2 PASS`, `STEP 3 PASS`,
    - Implemented `synthesize_khmer_speech(...)` with `BilingualCodeSwitchDecomposer`, `SymmetricS2STConsole`, and frozen `Vocos`.
    - Extracted speaker timbre and emotion tokens from real reference Khmer audio.
    - Integrated 15-layer DiT using Sway-schedule 12-step Euler ODE with Classifier-Free Guidance (`cfg_scale=1.5`).
+   - Applied peak normalization (`wav / max(peak, 1e-6) * 0.92`) and configurable conversational pacing (default 24 frames = 240ms/syllable) to eliminate square-wave rail clipping and ensure natural, audible speech duration.
 2. **Synthesized Benchmark Speech Clips:**
    - `checkpoints/tts_test_1_greeting.wav`: `"សួស្តីកម្ពុជា ខ្ញុំឈ្មោះសុភមង្គល"` (Formal Greeting)
      - Syllable count: 11
-     - Acoustic frames: 198 (100 Hz)
-     - Duration: 1.98s (47,520 samples @ 24,000 Hz)
-     - File size: 95,084 bytes
-     - RMS Energy: `0.4046`
+     - Acoustic frames: 264 (100 Hz)
+     - Duration: 2.64s (63,360 samples @ 24,000 Hz)
+     - File size: 126,764 bytes
+     - RMS Energy: `0.0545`
    - `checkpoints/tts_test_2_sentence.wav`: `"ប្រទេសកម្ពុជាមានធម្មជាតិដ៏ស្រស់ស្អាត"` (Descriptive Sentence)
      - Syllable count: 12
+     - Acoustic frames: 288 (100 Hz)
+     - Duration: 2.88s (69,120 samples @ 24,000 Hz)
+     - File size: 138,284 bytes
+     - RMS Energy: `0.0548`
+   - `checkpoints/tts_test_3_codeswitch.wav`: `"ខ្ញុំទៅភ្នំពេញទិញ Calvin Klein និង Versace"` (Bilingual Code-Switching)
+     - Syllable count: 9
      - Acoustic frames: 216 (100 Hz)
      - Duration: 2.16s (51,840 samples @ 24,000 Hz)
      - File size: 103,724 bytes
-     - RMS Energy: `0.4073`
-   - `checkpoints/tts_test_3_codeswitch.wav`: `"ខ្ញុំទៅភ្នំពេញទិញ Calvin Klein និង Versace"` (Bilingual Code-Switching)
-     - Syllable count: 9
-     - Acoustic frames: 162 (100 Hz)
-     - Duration: 1.62s (38,880 samples @ 24,000 Hz)
-     - File size: 77,804 bytes
-     - RMS Energy: `0.4291`
+     - RMS Energy: `0.0555`
 3. **Step 3 Self-Audit Gate Results:**
    - **Header Integrity:** Valid 44-byte RIFF/WAVE headers verified on all 3 files (`RIFF`, `WAVEfmt `, 24000 Hz, 1 channel, 16-bit PCM, `data`).
    - **Numerical Integrity:** Zero `NaN` or `Inf` samples across all audio waveforms.
-   - **Signal Energy:** RMS energy measured between `0.4046` and `0.4291`, strictly exceeding the `> 0.02` threshold (loud, clear, active speech energy).
-   - **Duration Scaling:** Durations strictly scale monotonically with syllable count: 9 syllables (1.62s) < 11 syllables (1.98s) < 12 syllables (2.16s).
+   - **Signal Energy:** RMS energy measured between `0.0545` and `0.0555`, strictly exceeding the `> 0.02` threshold (clean, non-clipped audible speech energy).
+   - **Duration Scaling:** Durations strictly scale monotonically with syllable count: 9 syllables (2.16s) < 11 syllables (2.64s) < 12 syllables (2.88s).
    - **Gate Status:** `PASSED [100% OK]`.
 
 

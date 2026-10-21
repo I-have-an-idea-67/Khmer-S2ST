@@ -5,8 +5,17 @@
 
 # --- Python virtual environments -------------------------------------------
 .venv/
+.env
+*.env
+.env.*
 venv/
+.env
+*.env
+.env.*
 env/
+.env
+*.env
+.env.*
 
 # --- Python bytecode / caches ----------------------------------------------
 __pycache__/

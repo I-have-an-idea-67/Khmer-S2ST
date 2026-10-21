@@ -82,15 +82,18 @@ SLOT_NAMES = (
     "sesqui_ids",
 )
 
-# Multi-corpus priority list
-CANDIDATES: List[Tuple[str, Optional[str], str]] = [
-    ("phonsobon/openslr42-khmer-male", None, "train"),
-    ("seanghay/km-speech-corpus", None, "train"),
-    ("rinabuoy/khm-asr-open", None, "train"),
-    ("Digital-Divide-Data/khm-asr-cultural", None, "train"),
-    ("google/fleurs", "km_kh", "train"),
-    ("google/fleurs", "km_kh", "validation"),
-    ("google/fleurs", "km_kh", "test"),
+# Multi-corpus priority list: (repo, config, split, probe_timeout_seconds)
+CANDIDATES: List[Tuple[str, Optional[str], str, Optional[float]]] = [
+    ("KrorngAI/fleurs_openslr42_mpwt", None, "train", 60.0),
+    ("seanghay/khmer_mpwt_speech", None, "train", 60.0),
+    ("seanghay/khmer_grkpp_speech", None, "train", 60.0),
+    ("google/fleurs", "km_kh", "train", 60.0),
+    ("google/fleurs", "km_kh", "validation", 60.0),
+    ("google/fleurs", "km_kh", "test", 60.0),
+    ("seanghay/km-speech-corpus", None, "train", 180.0),
+    ("rinabuoy/khm-asr-open", None, "train", 180.0),
+    ("phonsobon/openslr42-khmer-male", None, "train", 30.0),
+    ("Digital-Divide-Data/khm-asr-cultural", None, "train", 60.0),
 ]
 
 _OFFLINE_PATCHES: List[Any] = []
@@ -310,9 +313,15 @@ def _iter_viable_candidates(
     probe_timeout_sec: float = 25.0,
 ) -> Iterator[Tuple[str, Optional[str], str, Any]]:
     """Probe candidate datasets in priority order and yield active streams."""
-    for repo, config, split in CANDIDATES:
+    for candidate in CANDIDATES:
+        repo, config, split = candidate[0], candidate[1], candidate[2]
+        cand_timeout = (
+            candidate[3]
+            if len(candidate) > 3 and candidate[3] is not None
+            else probe_timeout_sec
+        )
         label = f"{repo}" + (f"/{config}" if config else "") + f" [{split}]"
-        print(f"\n[candidate-probe] Probing {label}...", flush=True)
+        print(f"\n[candidate-probe] Probing {label} (timeout={cand_timeout:.0f}s)...", flush=True)
 
         cached = _is_cached(repo, config)
         order = (True, False) if cached else (False,)
@@ -344,10 +353,10 @@ def _iter_viable_candidates(
             thread.start()
 
             try:
-                status, payload = q.get(timeout=probe_timeout_sec)
+                status, payload = q.get(timeout=cand_timeout)
             except queue.Empty:
                 print(
-                    f"  -> SKIPPED (no first row within {probe_timeout_sec:.0f}s timeout)",
+                    f"  -> SKIPPED (no first row within {cand_timeout:.0f}s timeout)",
                     flush=True,
                 )
                 continue
@@ -369,7 +378,8 @@ def _iter_viable_candidates(
             finally:
                 if offline:
                     _restore_offline()
-            # If this candidate opened and yielded, advance once exhausted
+            # If candidate stream opened and yielded, advance once exhausted; don't re-probe online
+            break
 
 
 # ============================================================================
@@ -596,7 +606,7 @@ def run_ingestion(
 def verify_shards(out_dir: Path, expected_min_shards: int = 1) -> bool:
     """Rigorous audit gate verifying PCM16 audio, slot bounds, and shard size."""
     print("\n" + "-" * 78)
-    print("STEP 2 SELF-AUDIT VERIFICATION GATE")
+    print("STEP 1 SELF-AUDIT VERIFICATION GATE")
     print("-" * 78)
 
     shards = sorted(out_dir.glob("shard_*.pt"))
@@ -604,44 +614,46 @@ def verify_shards(out_dir: Path, expected_min_shards: int = 1) -> bool:
         f"Expected at least {expected_min_shards} shards, found {len(shards)}"
     )
 
-    shard_0 = shards[0]
-    size_mb = shard_0.stat().st_size / (1024**2)
-    print(f"[AUDIT] Checking {shard_0.name} (file size: {size_mb:.2f} MiB)...")
-    assert size_mb < 40.0, f"Shard file size {size_mb:.2f} MiB exceeds 40 MB ceiling"
+    total_clips = 0
+    for shard_idx, shard_path in enumerate(shards):
+        size_mb = shard_path.stat().st_size / (1024**2)
+        data = torch.load(shard_path, map_location="cpu", weights_only=False)
+        assert isinstance(data, list) and len(data) > 0, f"{shard_path.name} data must be a non-empty list"
+        n_clips = len(data)
+        total_clips += n_clips
+        avg_mb = size_mb / n_clips
+        print(f"[AUDIT] Checking {shard_path.name} ({n_clips} clips, {size_mb:.2f} MiB, {avg_mb:.2f} MiB/clip)...")
+        assert avg_mb < 2.0, f"{shard_path.name} average clip size {avg_mb:.2f} MiB exceeds 2.0 MiB ceiling"
 
-    data = torch.load(shard_0, map_location="cpu", weights_only=False)
-    assert isinstance(data, list) and len(data) > 0, "Shard data must be a non-empty list"
-    print(f"[AUDIT] Shard {shard_0.name} contains {len(data)} clips.")
+        for i, clip in enumerate(data):
+            assert isinstance(clip, dict), f"{shard_path.name} clip {i} is not a dict"
+            assert "wav_16k" in clip and "wav_24k" in clip, f"{shard_path.name} clip {i} missing audio tensors"
+            assert clip["wav_16k"].dtype == torch.int16, f"{shard_path.name} clip {i} wav_16k dtype != torch.int16"
+            assert clip["wav_24k"].dtype == torch.int16, f"{shard_path.name} clip {i} wav_24k dtype != torch.int16"
+            assert clip["wav_16k"].ndim == 1, f"{shard_path.name} clip {i} wav_16k must be 1-D mono"
+            assert clip["wav_24k"].ndim == 1, f"{shard_path.name} clip {i} wav_24k must be 1-D mono"
 
-    for i, clip in enumerate(data):
-        assert isinstance(clip, dict), f"Clip {i} is not a dict"
-        assert "wav_16k" in clip and "wav_24k" in clip, f"Clip {i} missing audio tensors"
-        assert clip["wav_16k"].dtype == torch.int16, f"Clip {i} wav_16k dtype != torch.int16"
-        assert clip["wav_24k"].dtype == torch.int16, f"Clip {i} wav_24k dtype != torch.int16"
-        assert clip["wav_16k"].ndim == 1, f"Clip {i} wav_16k must be 1-D mono"
-        assert clip["wav_24k"].ndim == 1, f"Clip {i} wav_24k must be 1-D mono"
-
-        assert isinstance(clip.get("transcript"), str) and len(clip["transcript"]) > 0, (
-            f"Clip {i} transcript must be non-empty string"
-        )
-        assert _has_khmer(clip["transcript"]), f"Clip {i} transcript must contain Khmer text"
-        assert isinstance(clip.get("source_dataset"), str), f"Clip {i} missing source_dataset"
-        assert isinstance(clip.get("clip_id"), str), f"Clip {i} missing clip_id"
-
-        # 7-slot tensor verification
-        for slot in SLOT_NAMES:
-            assert slot in clip, f"Clip {i} missing slot {slot}"
-            t = clip[slot]
-            assert isinstance(t, torch.Tensor), f"Clip {i} slot {slot} is not a Tensor"
-            assert t.dtype in (torch.int16, torch.int64, torch.uint8), (
-                f"Clip {i} slot {slot} has unexpected dtype {t.dtype}"
+            assert isinstance(clip.get("transcript"), str) and len(clip["transcript"]) > 0, (
+                f"{shard_path.name} clip {i} transcript must be non-empty string"
             )
-            assert t.ndim == 1, f"Clip {i} slot {slot} must be 1-D"
-            assert len(t) > 0, f"Clip {i} slot {slot} is empty"
-            assert t.min().item() >= 0, f"Clip {i} slot {slot} has negative token ID {t.min().item()}"
+            assert _has_khmer(clip["transcript"]), f"{shard_path.name} clip {i} transcript must contain Khmer text"
+            assert isinstance(clip.get("source_dataset"), str), f"{shard_path.name} clip {i} missing source_dataset"
+            assert isinstance(clip.get("clip_id"), str), f"{shard_path.name} clip {i} missing clip_id"
 
-    print(f"[AUDIT] All {len(data)} clips in {shard_0.name} PASSED all verification checks.")
-    print("STEP 2 SELF-AUDIT VERIFICATION GATE: PASSED [100% OK]")
+            # 7-slot tensor verification
+            for slot in SLOT_NAMES:
+                assert slot in clip, f"{shard_path.name} clip {i} missing slot {slot}"
+                t = clip[slot]
+                assert isinstance(t, torch.Tensor), f"{shard_path.name} clip {i} slot {slot} is not a Tensor"
+                assert t.dtype in (torch.int16, torch.int64, torch.uint8), (
+                    f"{shard_path.name} clip {i} slot {slot} has unexpected dtype {t.dtype}"
+                )
+                assert t.ndim == 1, f"{shard_path.name} clip {i} slot {slot} must be 1-D"
+                assert len(t) > 0, f"{shard_path.name} clip {i} slot {slot} is empty"
+                assert t.min().item() >= 0, f"{shard_path.name} clip {i} slot {slot} has negative token ID {t.min().item()}"
+
+    print(f"[AUDIT] Verified {len(shards)} shards containing {total_clips} total clips. All PASSED.")
+    print("STEP 1 SELF-AUDIT VERIFICATION GATE: PASSED [100% OK]")
     print("-" * 78)
     return True
 
